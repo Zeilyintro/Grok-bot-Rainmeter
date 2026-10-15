@@ -173,7 +173,9 @@ function GazeUpdate(now,size,eligible,limits,mod)
   local tau=mod.tau or .10
   local a=1-math.exp(-dt/tau)
   local ty,tp=nil,nil
-  if gazeEnabled and mod.noFollow then
+  if mod.sleep then
+    ty,tp=mod.sleepYaw or 0,-6       -- asleep: eyes settle low, looking down
+  elseif gazeEnabled and mod.noFollow then
     ty,tp=0,10                       -- dizzy: stares ahead, eyes rolling
   elseif gazeEnabled then
     local cx=tonumber(SKIN:GetVariable('CURRENTCONFIGX','0'))+size/2
@@ -204,7 +206,7 @@ function GazeUpdate(now,size,eligible,limits,mod)
     gaze.pitch=gaze.pitch+math.max(-limit,math.min(limit,(tp-gaze.pitch)*a))
   end
   -- Only an authored gaze action takes control; shape changes keep this weight.
-  local want=gazeEnabled and 1 or (w and w.mix or 0)
+  local want=(gazeEnabled or mod.sleep) and 1 or (w and w.mix or 0)
   local target=eligible and want or 0
   local step=dt/.25
   gaze.mix=gaze.mix+math.max(-step,math.min(step,target-gaze.mix))
@@ -385,9 +387,10 @@ local function starShape(x,y,r,rot)
 end
 local function withLook(p,t,look)
   if not look or look.mix<=0 or p[21]<=.01 then return p end
-  local q={r=p.r,n=p.n,bliss=p.bliss,spiral=p.spiral,spiralPhase=p.spiralPhase,stars=p.stars,starPhase=p.starPhase}
+  local q={r=p.r,n=p.n,bliss=p.bliss,shades=p.shades,still=p.still,spiral=p.spiral,spiralPhase=p.spiralPhase,stars=p.stars,starPhase=p.starPhase}
   for i=2,29 do q[i]=p[i] end
   local l=life(t,true)
+  if p.still then l={yaw=0,pitch=0} end    -- asleep: no idle drift (see geometry)
   q[9]=lerp(p[9]+l.yaw,look.yaw,look.mix)-l.yaw
   q[10]=lerp(p[10]+l.pitch,look.pitch,look.mix)-l.pitch
   return q
@@ -395,6 +398,7 @@ end
 local function geometry(p,t,size,forced,look)
   p=withLook(p,t,look)
   local l=life(t,p[21]>.01)
+  if p.still then l.lid=1;l.yaw=0;l.pitch=0;l.roll=0;l.dx=0;l.dy=0 end   -- asleep: no blinking or drift
   local scale=size/360
   local R=100
   local center=size/2
@@ -440,10 +444,11 @@ local function geometry(p,t,size,forced,look)
     local spiral=p.spiral or 0
     local fade=clamp((bliss-.45)/.3)
     fade=fade*fade*(3-2*fade)
-    eyes[i]={path=path,svg=svg,alpha=alpha*(1-spiral)*(1-fade)}
+    eyes[i]={path=path,svg=svg,alpha=alpha*(1-spiral)*(1-fade),base=alpha}
     -- unit axes: arc/spiral size never follows the pill's stretch
     local el=math.max(1e-6,math.sqrt(er[1]^2+er[2]^2))
     local sm={er[1]/el*scale,er[2]/el*scale,-er[2]/el*scale,er[1]/el*scale,m[5],m[6]}
+    eyes[i].sm=sm
     if spiral>.01 then
       local sp2,ss=spiralShape(sm,p.spiralPhase or 0,i==1 and 1 or -1)
       eyes[i].spiral={path=sp2,svg=ss,alpha=alpha*spiral}
@@ -451,6 +456,59 @@ local function geometry(p,t,size,forced,look)
       local sp2,ss=arcShape(p[at]*R,p[at+1]*R,sm,arcFit)
       eyes[i].spiral={path=sp2,svg=ss,alpha=alpha*fade}
     end
+  end
+  -- v30 dance sunglasses: two lenses (eye colour) slide down over the eyes,
+  -- a bridge (eye colour) and a highlight stripe per lens (body colour)
+  local shades=nil
+  local sh=p.shades or 0
+  if sh>.01 and (p.stars or 0)<=.01 then
+    local sep=math.max(30,math.sqrt(ex*ex+ey*ey)/scale)
+    local hw,hh=.42*sep,.27*sep
+    local k=clamp(sh)
+    k=k*k*(3-2*k)                       -- ease in and out
+    local lift=(1-k)*.8*sep
+    local a=clamp(sh/.35)
+    a=a*a*(3-2*a)
+    local hide=clamp((sh-.6)/.3)
+    local function put(list,sm,x,y)
+      y=y-lift
+      list[#list+1]={sm[1]*x+sm[3]*y+sm[5],sm[2]*x+sm[4]*y+sm[6]}
+    end
+    shades={}
+    for i=1,2 do
+      local sm=eyes[i].sm
+      local pts={}
+      for j=0,35 do
+        local t=j/36*TAU
+        local c,sn=math.cos(t),math.sin(t)
+        local x=(c<0 and -1 or 1)*math.abs(c)^.45*hw
+        local y=(sn<0 and -1 or 1)*math.abs(sn)^.6*hh
+        if y>0 then x=x*(1-.22*y/hh) else y=y*.85 end
+        put(pts,sm,x,y)
+      end
+      local lens,lensSvg=closedPath(pts)
+      -- v37: ^^ arcs move to the eye slot (drawn under the lens)
+      local arc=eyes[i].spiral
+      local pill=eyes[i].alpha*(1-hide)
+      if arc and arc.alpha>=pill then
+        eyes[i].path,eyes[i].svg,eyes[i].alpha=arc.path,arc.svg,arc.alpha
+      else
+        eyes[i].alpha=pill
+      end
+      eyes[i].spiral={path=lens,svg=lensSvg,alpha=eyes[i].base*a}
+      local st={}
+      for _,q in ipairs({{-.62,.05},{-.3,-.62},{-.1,-.62},{-.42,.05}}) do put(st,sm,q[1]*hw,q[2]*hh) end
+      local sp,ss=closedPath(st)
+      shades[i+1]={path=sp,svg=ss,alpha=eyes[i].base*a*.9}
+    end
+    local s1,s2=eyes[1].sm,eyes[2].sm
+    local dir=((s2[5]-s1[5])*s1[1]+(s2[6]-s1[6])*s1[2])<0 and -1 or 1
+    local yb,th=-.45*hh,.06*sep
+    local br={}
+    put(br,s1,dir*.8*hw,yb-th);put(br,s2,-dir*.8*hw,yb-th)
+    put(br,s2,-dir*.8*hw,yb+th);put(br,s1,dir*.8*hw,yb+th)
+    local bp,bs=closedPath(br)
+    shades[1]={path=bp,svg=bs,alpha=eyes[1].base*a,eye=true}
   end
   local badge=nil
   if p.n then
@@ -472,7 +530,7 @@ local function geometry(p,t,size,forced,look)
       stars[j]={path=path,svg=svg,alpha=p.stars*(.5+.5*depth)*p[22]}
     end
   end
-  return {body=body,svg=bodySvg,eyes=eyes,alpha=p[22],badge=badge,pts=pts,stars=stars}
+  return {body=body,svg=bodySvg,eyes=eyes,alpha=p[22],badge=badge,pts=pts,stars=stars or shades}
 end
 
 -- Procedural layer on top of authored poses: lean, squash, dents, eye tweaks.
@@ -503,6 +561,7 @@ local function applyOverlay(p,o,eyeK)
   q[2]=p[2]+(o.bodyRoll or 0)*PI/180
   q[7]=p[7]+o.dx
   q[8]=p[8]+o.dy
+  q[24]=p[24]+(o.eyeLift or 0)*eyeK
   q[11]=p[11]+o.roll
   if eyeK>0 then
     local w=1+(o.eyeScale-1)*eyeK
@@ -511,6 +570,7 @@ local function applyOverlay(p,o,eyeK)
     q[15]=p[15]*lid;q[19]=p[19]*lid
   end
   q.bliss=(o.bliss or 0)*eyeK
+  q.shades=(o.shades or 0)*eyeK;q.still=o.still
   q.spiral=(o.spiral or 0)*eyeK
   q.spiralPhase=o.spiralPhase
   q.stars=o.stars or 0
@@ -764,7 +824,8 @@ local function choose()
   -- Only action styles use a shuffle bag; rest targets may repeat later.
   if restRemaining==nil or (restRemaining==0 and #pool==0) then
     restRemaining=math.min(restCount,64)
-    for _,i in ipairs(actions) do pool[#pool+1]=i end
+    -- v30: sleep is not a random pick any more (it follows the idle time)
+    for _,i in ipairs(actions) do if styles[i].id~='sleep' then pool[#pool+1]=i end end
     -- notify ("!" bubble) is in the bag twice: it was one of 13 and rarely seen
     for _,i in ipairs(actions) do if styles[i].id=='notify' then pool[#pool+1]=i end end
   end
@@ -837,8 +898,15 @@ end
 -- All state lives in a few tables to stay within Lua 5.1 local/upvalue limits.
 local EXPRESSIONS={'neutre','attentif','blase','colere','confus','curieux','effraye','excite',
   'fier','heureux','hilare','mefiant','somnolent','surpris','timide','triste'}
--- faces never shown while dancing to music (negative or sleepy moods)
-local DANCE_BAD={blase=true,colere=true,confus=true,effraye=true,mefiant=true,somnolent=true,triste=true}
+-- v29: while dancing (and nobody plays with it) only these faces are shown
+local DANCE={ok={heureux=true,excite=true,fier=true,hilare=true,surpris=true},
+-- dance moods; bliss/shades are heureux with ^^ or sunglasses. The other
+-- faces are short visits (at most 4-6 s, a surprise 2.5-3 s).
+  moods={bliss=40,shades=40,heureux=7,hilare=5,surpris=3,excite=3,fier=2},
+  main={bliss=40,shades=40}}
+-- waking up: rudely woken (grumpy), on its own, or by music
+local WAKE={heavy={{'colere',50},{'surpris',30},{'blase',20}},rude={{'surpris',35},{'colere',30},{'blase',15},{'mefiant',10},{'somnolent',10}},
+  soft={{'somnolent',6},{'blase',3},{'neutre',1}}}
 local TRAIT_KEYS={'Bravery','Cling','Patience','Energy'}
 local TRAIT_DEFAULT={Bravery=.4,Cling=.55,Patience=.55,Energy=.5}
 local PRESETS={
@@ -988,7 +1056,8 @@ end
 local function brainPlan(how)
   local plan={total=1e9,hold=1e9,pace='brain'}
   if how=='soft' then plan.morph=.75;plan.soft=true
-  elseif how=='urgent' then plan.morph=.4;plan.soft=true end
+  elseif how=='urgent' then plan.morph=.4;plan.soft=true
+  elseif how=='sleep' then plan.morph=1.6;plan.soft=true end   -- settling down
   return plan
 end
 
@@ -1012,18 +1081,26 @@ local function actionPlan(style)
     -- show the finished badge for a while instead of ~2 s
     plan.total=style.morph/speed+randomSeconds(3.5,5)
   else
-    plan.total=style.base/60/speed+.4
+    -- orbit and play: their decoration runs past base (to ~4 s / ~3 s)
+    local length=style.base/60
+    if style.id=='orbit' then length=4 elseif style.id=='play' then length=3 end
+    plan.total=length/speed+.4
+    -- comet and burst end exactly on the plain circle pose: it stays there a
+    -- moment (blinking, looking around) before the usual morph back
+    if style.id=='comet' or style.id=='burst' then plan.total=plan.total+randomSeconds(1.5,3) end
   end
   return plan
 end
 
 -- while dancing, negative faces only come from live interaction or dizziness
+-- while dancing only real interaction (swipes, hits, laps, teasing, too much
+-- petting) changes the face; light interaction (near, hover) does not
 local function danceNegOK(now)
-  return now-B.lastInteract<4 or B.spiralOn or B.spiral>.05 or B.emo.dizzy>.3
+  return now-(B.strongAt or -1e9)<4 or B.annoy>.25 or B.spiralOn or B.spiral>.05 or B.emo.dizzy>.3 or now<(B.wakeUntil or 0)
 end
 local function goRest(now,body,expr,how)
-  if Mu.dancing and DANCE_BAD[expr] and not danceNegOK(now) then
-    expr=(B.danceMood and not DANCE_BAD[B.danceMood]) and B.danceMood or 'heureux'
+  if Mu.dancing and not DANCE.ok[expr] and not danceNegOK(now) then
+    expr=(B.danceMood and DANCE.ok[B.danceMood]) and B.danceMood or 'heureux'
   end
   local returning=styles[current].kind=='action'
   local protected=math.max(B.bodyUntil or 0,B.bodyLock or 0)
@@ -1087,18 +1164,51 @@ local function playAction(now,id,cooldown,force)
   return true
 end
 
-local function wake(now,startled)
+-- v30 sleep: a still pebble (galet) with a bored or sleepy face; it does not
+-- change while asleep. Pointer idle 45 s: one nap (20-45 s); idle 90-240 s:
+-- deep sleep (2-5 min), awake 1-2 min between; the third deep sleep lasts
+-- until a fast swipe / full lap (grumpy) or music (slowly) wakes it.
+-- Without pointer data it naps at random every 5-10 min.
+local function startSleep(now,kind)
+  local mood=math.random()<.5 and 'blase' or 'somnolent'
+  local ok=goRest(now,'galet',mood,'sleep')
+  if not ok and not (B.body=='galet' and B.expr==mood) then return false end
+  B.asleep=true;B.sleepKind=kind;B.musicFor=0;B.zNext=now+2.2
+  B.sleepYaw=({-6,0,6})[math.random(1,3)]   -- the eyes rest a little left, centred or right
+  -- how much disturbance wakes it: a few swipes or laps; now and then (8%)
+  -- it sleeps like a log and only long, persistent playing wakes it
+  B.disturb=0;B.heavySleep=math.random()<.08
+  B.wakeNeed=B.heavySleep and rnd(10,14) or (kind=='nap' and rnd(2,3) or (kind=='deep' and rnd(2.5,4) or rnd(3.5,5)))
+  B.sleepUntil=kind=='long' and 1e12 or now+(kind=='nap' and rnd(20,45) or rnd(120,300))
+  return true
+end
+
+local function wake(now,how)
   if not B.asleep then return end
-  local s=styles[current]
-  local dt=now-currentStart
-  local t=dt*speed
-  local boundary=t<=s.loopStart and s.loopStart or s.loopStart+math.ceil((t-s.loopStart)/s.loopPeriod)*s.loopPeriod
-  currentPlan.turn=boundary/speed
-  currentPlan.total=currentPlan.turn+currentPlan.back+.2
   B.asleep=false
-  B.bored=0
-  B.nextAuto=math.max(B.nextAuto,now+8)
-  if startled then B.emo.surprise=math.max(B.emo.surprise,.8) else B.groggy=now+6 end
+  B.nextAuto=math.max(B.nextAuto,now+8);B.autoHold=0
+  if how=='soft' and B.sleepKind~='nap' then B.deepAt=now+rnd(60,120) end
+  if how~='soft' then B.idleBase=now end      -- woken by someone: a new idle period
+  B.randNapAt=now+rnd(300,600)
+  local list=how=='rude' and (B.heavySleep and WAKE.heavy or WAKE.rude) or WAKE.soft
+  local total=0
+  for _,w in ipairs(list) do total=total+w[2] end
+  local r=math.random()*total
+  local mood=list[1][1]
+  for _,w in ipairs(list) do r=r-w[2];if r<=0 then mood=w[1];break end end
+  if how~='rude' then
+    -- a little stir on waking; the face follows a moment later
+    O.sway.v=O.sway.v+2.5
+    B.styleUntil=math.max(B.styleUntil or 0,now+1.2)
+  end
+  if how=='music' then
+    mood='somnolent';B.wakeUntil=now+.8+rnd(2,3);B.danceWait=B.wakeUntil
+  else
+    B.wakeUntil=now+rnd(3,4)
+    if mood=='surpris' then B.emo.surprise=math.max(B.emo.surprise,.7)
+    elseif mood=='colere' then B.emo.anger=math.max(B.emo.anger,.6) end
+  end
+  B.wakeMood=mood
 end
 
 -- ---------- emotions ----------
@@ -1143,9 +1253,13 @@ function REACT.brush(now,g,fast)
   if not fast then feel('curious',.1*g);return end
   local n=now-(B.sweepLast or -1e9)<5 and (B.sweepCount or 0)+1 or 1
   B.sweepLast=now;B.sweepCount=n;B.sweepUntil=now+3
-  B.sweepMood=n==1 and 'blase' or (n==2 and 'mefiant' or 'colere')
-  B.annoy=math.max(B.annoy,.4);B.annoyHold=now+3
-  B.emo.joy=math.min(B.emo.joy,.25)
+  -- v41: one swipe is only a little "hm" (nothing while dancing); fed up
+  -- (vein mark, dance pause) from 3 swipes in a row, very fed up from 5
+  if n==1 then B.sweepMood=(not Mu.dancing) and 'blase' or nil
+  elseif n==2 then B.sweepMood='mefiant' else B.sweepMood='colere' end
+  if n>=5 then B.annoy=math.max(B.annoy,.9);B.annoyHold=now+3
+  elseif n>=3 then B.annoy=math.max(B.annoy,.45);B.annoyHold=now+3 end
+  if n>=2 then B.emo.joy=math.min(B.emo.joy,.25) end
   feel('anger',(.18+.07*math.min(n,4))*g)
   B.petting=false;B.petMood=nil;B.hover=false;M.petStart=nil
 end
@@ -1205,11 +1319,23 @@ local function event(now,name,g,...)
   g=g or habit(name,now)
   B.lastEvent=name;B.lastEventAt=now
   if EVENT_LOG then EVENT_LOG[#EVENT_LOG+1]=string.format('%.2f %s %.2f',now,name,g) end
-  interacted(now)
   if B.asleep then
-    if name=='hit' or name=='rush' or name=='shake' then wake(now,true) else wake(now,false) end
+    -- asleep: fast swipes, hits, shaking and laps add up (fading slowly);
+    -- past its threshold it wakes grumpy, before that it only stirs. The
+    -- rest is not noticed at all.
+    local fast=...
+    local add=(name=='hit' or name=='circle') and 1.5 or (name=='shake' and 2
+      or ((name=='rush' or (name=='brush' and fast)) and 1 or 0))
+    if add>0 then
+      B.disturb=(B.disturb or 0)+add
+      if B.disturb>=(B.wakeNeed or 0) then interacted(now);wake(now,'rude')
+      else O.sway.v=O.sway.v+1.2 end
+    end
+    return
   end
+  interacted(now)
   if name=='pet' or name=='tickle' or name=='approach' or name=='circle' or name=='tease' then B.lastEngaged=now end
+  if name=='hit' or name=='rush' or name=='shake' or name=='circle' or name=='tease' or (name=='brush' and ... and not (Mu.dancing and now-(B.sweepLast or -1e9)>=5)) then B.strongAt=now end
   REACT[name](now,g,...)
 end
 
@@ -1314,14 +1440,6 @@ local function sense(now,dt,size,geo)
   local moving=now-M.lastMove<.12
   if d<5 then M.zone=(M.zone or 0)+dt else M.zone=0 end
 
-  if B.asleep then
-    M.travel=(M.travel or 0)+raw
-    if M.travel>8 then
-      M.travel=0
-      if d<3 and M.speed>10 and full then event(now,'rush',nil) else wake(now,false) end
-    end
-  else M.travel=0 end
-
   -- busy: fast pointer travel far away = the user is working
   local far=d>6 and M.speed>8 and moving
   M.busy=M.busy+((far and 1 or 0)-M.busy)*(1-math.exp(-dt/20))
@@ -1382,7 +1500,7 @@ local function sense(now,dt,size,geo)
   end
   local excluded=countSince(M.rev,now-.6)>=2 or now-(M.circlingAt or -1e9)<=.8
     or now<(B.sweepUntil or 0)
-  B.petting=nearBody and not excluded
+  B.petting=nearBody and not excluded and not B.asleep
   B.petMood=B.petting and 'heureux' or nil
   if B.petting then
     if not M.petStart then M.petStart=now;M.petGain=habit('pet',now) end
@@ -1441,7 +1559,7 @@ local function sense(now,dt,size,geo)
     elseif now-en.t>.8 then settle() end
   end
   if M.inside and M.speed<2 then M.still=(M.still or 0)+dt else M.still=0 end
-  B.hover=M.inside and M.still>(full and .8 or 1.5)
+  B.hover=M.inside and M.still>(full and .8 or 1.5) and not B.asleep
   if B.hover then interacted(now);B.lastEngaged=now end
 
   -- circling around the body
@@ -1755,7 +1873,7 @@ local function hearing(now,dt)
   local busy=Mu.dancing and clamp((perBeat-1.3)/1.7) or 0
   Mu.busy=Mu.busy+(busy-Mu.busy)*(1-math.exp(-dt))
   local loud=clamp((math.log10(math.max(Mu.rms,1e-4))+2.6)/1.6)
-  local want=(Mu.dancing and not B.action) and (.6+.4*loud)*clamp(.35+Mu.conf*.75) or 0
+  local want=(Mu.dancing and not B.action and not B.asleep and now>=(B.danceWait or 0)) and (.6+.4*loud)*clamp(.35+Mu.conf*.75) or 0
   Mu.amp=Mu.amp+(want-Mu.amp)*(1-math.exp(-dt/(want>Mu.amp and .5 or .7)))
 end
 
@@ -1778,6 +1896,7 @@ local function scores()
   s.blase=(B.bored>.35 and B.bored<=.75) and B.bored or 0
   s.somnolent=B.bored>.75 and B.bored or 0
   if B.groggy and B.now<B.groggy then s.somnolent=math.max(s.somnolent,.7) end
+  if B.wakeMood and B.now<(B.wakeUntil or 0) then s[B.wakeMood]=math.max(s[B.wakeMood] or 0,.95) end
   local idle=B.idleExpr or 'neutre'
   s[idle]=math.max(s[idle] or 0,.3)
   if B.danceMood and Mu.dancing then s[B.danceMood]=math.max(s[B.danceMood] or 0,.7) end
@@ -1789,7 +1908,9 @@ local function scores()
   if B.sweepMood and B.now<(B.sweepUntil or 0) and e.surprise<.5 and e.fear<.5 and e.dizzy<.3 then
     s[B.sweepMood]=math.max(s[B.sweepMood] or 0,.98)
   end
-  if Mu.dancing and not danceNegOK(B.now) then for k in pairs(DANCE_BAD) do s[k]=0 end end
+  if Mu.dancing and not danceNegOK(B.now) then
+    for _,k in ipairs(EXPRESSIONS) do if not DANCE.ok[k] then s[k]=0 end end
+  end
   return s
 end
 
@@ -1809,7 +1930,7 @@ local function pickExpression(now)
   local cur=s[B.expr] or 0
   -- keep the face the autonomous rhythm picked until its dwell ends,
   -- unless something is actually happening
-  if now<(B.autoHold or 0) and not URGENT[best] and strongestEmotion()<(Mu.dancing and .6 or .45) and now-B.lastInteract>5 then return nil end
+  if now<(B.autoHold or 0) and not Mu.dancing and not URGENT[best] and strongestEmotion()<(Mu.dancing and .6 or .45) and now-B.lastInteract>5 then return nil end
   local ready=URGENT[best] and math.max(B.exprSince+.8,B.urgentUntil or 0,URGENT[B.expr] and (B.styleUntil or 0) or 0)
     or math.max(restReadyAt(),B.styleUntil or 0)
   local margin=URGENT[best] and URGENT[B.expr] and .2 or .1
@@ -1832,7 +1953,10 @@ local function weighted(map)
     local v=map[name]
     if v then r=r-v;if r<=0 then return name end end
   end
-  if map.bliss and r<=map.bliss then return 'bliss' end
+  for _,name in ipairs({'bliss','shades'}) do
+    local v=map[name]
+    if v then r=r-v;if r<=0 then return name end end
+  end
   return 'neutre'
 end
 
@@ -1872,17 +1996,29 @@ local function updateAnnoy(now,dt)
     B.annoy=math.max(0,B.annoy-.2*dt)
   end
   if B.annoy>.3 then B.emo.joy=math.min(B.emo.joy,.25) end
+  -- v39: fed up -> the dance pauses (eases out); it resumes ~2 s after calming
+  if B.annoy>.3 then B.danceWait=math.max(B.danceWait or 0,now+2) end
   -- once it has calmed down, sit quietly for a bit before random faces return
   if B.annoyWas and B.annoy<.25 then B.idleExpr='neutre';B.nextAuto=math.max(B.nextAuto,now+8);B.nextIdle=math.max(B.nextIdle,now+8) end
   B.annoyWas=B.annoy>=.25
 end
+-- a new dance face, different from the current one
+local function danceMoodPick(now,map)
+  local old=B.danceEyes or B.danceMood
+  local m=weighted(map)
+  for _=1,4 do if m~=old then break end;m=weighted(map) end
+  B.danceEyes=(m=='bliss' or m=='shades') and m or nil
+  B.danceMood=B.danceEyes and 'heureux' or m
+  B.danceMoodUntil=(not B.danceEyes) and now+(m=='surpris' and rnd(2.5,3) or rnd(4,6)) or nil
+end
+
 local function decide(now,dt)
   local e=B.emo
   -- emotional bodies
   if B.hover and not B.petting then
     if B.affinity>.45 or T('Cling')>.6 then feel('joy',.12*dt) else feel('shy',.2*dt) end
   end
-  if e.excite>.75 and Mu.conf<.1 and now-Mu.lastBeat>10 and B.body~='etoile' and now>B.bodyLock and not B.action then
+  if e.excite>.75 and Mu.conf<.1 and now-Mu.lastBeat>10 and B.body~='etoile' and now>B.bodyLock and not B.action and not B.asleep then
     if goRest(now,'etoile',B.expr) then B.bodyLock=now+10 end
   end
   if Mu.dancing then
@@ -1895,35 +2031,64 @@ local function decide(now,dt)
       -- music is a background mood: capped, so interaction can still show
       if e.joy<.5 then B.emo.joy=math.min(.5,e.joy+.04) end
       if e.excite<.55 then B.emo.excite=math.min(.55,e.excite+.03+.06*clamp(Mu.rms*4)) end
-      -- the face rotates on the beat, about every 8 beats
-      if not B.danceMood or Mu.beats%16==1 then
-        local m=weighted({heureux=1,excite=.5,fier=.5,bliss=8})
-        -- "bliss": happy face with ^^ eyes, enjoying the song
-        B.danceBliss=m=='bliss'
-        B.danceMood=m=='bliss' and 'heureux' or m
-      end
+      -- the first face of a song; now and then a surprise ("oh, this one is
+      -- good!"). Later changes follow the original dwell (see below).
+      if Mu.beats==1 and not B.asleep and now>=(B.danceWait or 0) and math.random()<.12 then
+        B.danceMood='surpris';B.danceEyes=nil;B.danceMoodUntil=now+rnd(2.5,3)
+      elseif not B.danceMood then danceMoodPick(now,DANCE.moods) end
     end
+    -- the short visits end on time, back to ^^ or sunglasses
+    if B.danceMoodUntil and now>=B.danceMoodUntil then danceMoodPick(now,DANCE.main) end
   else
     if now-(Mu.lastDance or -1e9)>12 then Mu.beats=0 end
-    B.danceMood=nil;B.danceBliss=false
+    B.danceMood=nil;B.danceEyes=nil;B.danceMoodUntil=nil
   end
 
   -- boredom from a motionless pointer (the user is reading or away)
-  -- without pointer data (interaction off) nothing counts as "user away"
-  local idleFor=M.valid and now-M.lastMove or 0
+  -- without pointer data (interaction off) nothing counts as "user away".
+  -- Waking up by itself does not reset the idle time; any pointer movement,
+  -- being woken or music does (a new idle period).
+  local cycle=M.valid and math.max(M.lastMove,B.idleBase or -1e9) or 0
+  local idleFor=M.valid and now-cycle or 0
+  if cycle~=B.idleCycle then B.idleCycle=cycle;B.napDone=false;B.deepCount=0;B.deepAt=nil end
   local sleepAfter=90+T('Energy')*150
   if Mu.dancing then B.bored=0
   elseif idleFor>30 then B.bored=clamp((idleFor-30)/(sleepAfter-30)) else B.bored=decayTo(B.bored,2,dt) end
-  if B.bored>=1 and not B.action and now>=(B.napAt or 0) and not dizzyNow(now)
-    and now>=math.max(restReadyAt(),B.styleUntil or 0,B.bodyUntil or 0,B.bodyLock or 0) then
-    -- a short nap (the original sleep animation), then it carries on
-    B.napAt=now+rnd(300,600)
-    local index=Ix.byId.sleep
-    if index then
-      B.afterActionWait=math.max(2,(B.nextAuto or now)-now)
-      B.action='sleep';B.actionGap=now+6;switch(now,index,actionPlan(styles[index]))
+  if B.asleep then
+    -- music wakes it slowly (after ~3 s), otherwise it wakes by itself
+    B.musicFor=Mu.dancing and (B.musicFor or 0)+dt or 0
+    B.disturb=decayTo(B.disturb or 0,10,dt)
+    if B.musicFor>=3 then wake(now,'music')
+    elseif now>=(B.sleepUntil or 0) then wake(now,'soft') end
+    if B.asleep then return end              -- asleep: nothing else changes
+  end
+  -- Falling asleep in steps: no new full animation shortly before (it would
+  -- be cut), a running one finishes, then a sleepy face on the current body
+  -- for a few seconds, then a slow settle into the pebble.
+  local due,soon=nil,false
+  if M.valid then
+    if idleFor>=sleepAfter and now>=(B.deepAt or 0) then due=(B.deepCount or 0)>=2 and 'long' or 'deep'
+    elseif idleFor>=45 and not B.napDone then due='nap' end
+    soon=(not B.napDone and idleFor>=33) or (idleFor>=sleepAfter-12 and now>=(B.deepAt or 0)-12)
+  else
+    B.randNapAt=B.randNapAt or now+rnd(300,600)
+    if now>=B.randNapAt then due='nap' end
+    soon=now>=B.randNapAt-12
+  end
+  B.sleepSoon=soon or due~=nil
+  if not due or B.action or Mu.dancing or dizzyNow(now) or not quietNow(now) then
+    due=nil;B.drowsyAt=nil                   -- something came up
+  end
+  if due and now>=math.max(restReadyAt(),B.styleUntil or 0,B.bodyUntil or 0,B.bodyLock or 0) then
+    if not B.drowsyAt then
+      if B.expr=='somnolent' or goRest(now,B.body,'somnolent','soft') then B.drowsyAt=now+rnd(2.5,3.5) end
+    elseif now>=B.drowsyAt and startSleep(now,due) then
+      B.drowsyAt=nil;B.napDone=true
+      if due=='nap' then B.randNapAt=now+1e9 else B.deepCount=(B.deepCount or 0)+1 end
+      return
     end
   end
+  if B.drowsyAt then return end             -- drowsy: nothing else changes
 
   if B.action then return end
   local expr=pickExpression(now)
@@ -1956,6 +2121,15 @@ local function decide(now,dt)
     end
     B.holdWhy=nil
     local engaged=not quietNow(now)
+    -- v39: dancing is no interaction; the joy/excite the music brings does not
+    -- hold the face, so dance faces follow the original dwell
+    if engaged and Mu.dancing and B.annoy<.25 and not B.petting and not B.hover and now-B.lastInteract>5 then
+      local m=0
+      for k,v in pairs(B.emo) do
+        if k~='content' and not ((k=='joy' or k=='excite') and v<=.6) and v>m then m=v end
+      end
+      engaged=m>=.45
+    end
     local wait=dwell()*(busy and 1.25 or 1)*(1+B.bored*.8)
     B.nextAuto=now+wait
     local index=choose()
@@ -1964,12 +2138,18 @@ local function decide(now,dt)
     -- the face stays with the current feeling (only the body changes)
     local clash=st.kind=='action' and (Mu.dancing or engaged and
       (B.petting or B.annoy>.25 or st.id=='alert' or st.id=='exclaim' or st.id=='sleep'))
+    if st.kind=='action' and B.sleepSoon then clash=true end   -- about to fall asleep
     if clash then pool[#pool+1]=index end           -- keep it for later
     if st.kind=='action' and not clash then
       B.afterActionWait=wait
       B.action=st.id;B.asleep=false;B.actionGap=now+6
       switch(now,index,actionPlan(st))
-    elseif engaged or (Mu.dancing and st.kind=='action') then
+    elseif Mu.dancing and not engaged and st.kind=='rest' then
+      -- dancing: the original dwell and change type; a pick that changes the
+      -- face draws a new dance face instead of the picked expression
+      if st.expression~=B.expr then danceMoodPick(now,DANCE.moods) end
+      goRest(now,st.body,B.danceMood or B.expr)
+    elseif engaged or Mu.dancing then
       -- same odds as the original: only picks that change the body do so
       -- (a held-back action while dancing becomes a body change)
       local body=st.kind=='rest' and st.body or pickBody(B.body)
@@ -1977,9 +2157,6 @@ local function decide(now,dt)
     else
       -- once it is getting sleepy only the body keeps changing
       local expr=B.bored>.35 and B.expr or st.expression
-      -- now and then a content ^^ moment is one of the random picks
-      B.autoBlissUntil=nil
-      if B.bored<=.35 and math.random()<1/10 then expr='heureux';B.autoBlissUntil=B.nextAuto end
       B.idleExpr=expr
       goRest(now,st.body,expr)
     end
@@ -1988,7 +2165,6 @@ local function decide(now,dt)
       scheduleAuto(now,wait)
       if not engaged then
         B.autoHold=B.nextAuto+.5
-        if B.autoBlissUntil then B.autoBlissUntil=B.nextAuto end
       end
     end
   end
@@ -2091,17 +2267,30 @@ local function overlay(now,dt)
     -- Proximity reaches smiling arcs, even for an aloof pet.
     blissTarget=clamp(.9+B.affinity*.1+(cling-.5)*.1,.9,1)
   elseif B.hover and (B.affinity>.45 or cling>.6) then blissTarget=.2 end
-  -- ^^ as a random/dance mood: only while the face is happy and nothing else goes on
-  local moodBliss=(B.autoBlissUntil and now<B.autoBlissUntil) or (B.danceBliss and Mu.dancing)
-  if moodBliss and B.expr=='heureux' and not B.action and not B.petting and not B.hover
-    and now-B.lastInteract>2 and (not Mu.dancing or
-      (e.anger<.3 and e.fear<.3 and e.surprise<.3 and not dizzyNow(now))) then blissTarget=math.max(blissTarget,1) end
+  -- dance eyes (^^ or sunglasses): only while the face is happy and nothing
+  -- else goes on. Petting/hover use ^^, then the dance eyes come back.
+  -- v37: ^^ arcs (B.bliss) and sunglasses (B.shade) are separate layers, so
+  -- switching between them never shows the plain eyes in between
+  local shadeTarget=0
+  if Mu.dancing and B.danceEyes and B.expr=='heureux' and not B.action and not B.asleep and not B.petting and not B.hover
+    and now-(B.strongAt or -1e9)>2 and e.anger<.3 and e.fear<.3 and e.surprise<.3 and not dizzyNow(now) then
+    if B.danceEyes=='shades' then shadeTarget=1 else blissTarget=1 end
+  end
   if B.annoy>.3 or e.anger>.5 or e.surprise>.5 or e.fear>.5 or dizzyNow(now) then
-    blissTarget=0;comfort=false
+    blissTarget=0;shadeTarget=0;comfort=false
   end
   local movingNear=M.valid and M.d<3.5 and now-M.lastMove<.12
-  if movingNear and not comfort then blissTarget=0 end
-  local tau=blissTarget>B.bliss and .8 or 1.5
+  if movingNear and not comfort and not Mu.dancing then blissTarget=0 end
+  B.shade=B.shade or 0
+  -- shades -> ^^: the arcs form under the lenses first, then the lenses lift
+  if blissTarget>.75 and B.bliss<.5 then shadeTarget=math.max(shadeTarget,B.shade) end
+  -- ^^ -> shades: the lenses slide on first, the arcs fade out under them
+  if shadeTarget>0 and B.shade<.9 then blissTarget=math.max(blissTarget,B.bliss) end
+  -- sunglasses: a steady slide, on in ~0.6 s and off in ~0.5 s
+  local step=dt/(shadeTarget>B.shade and .6 or .5)
+  B.shade=shadeTarget>B.shade and math.min(shadeTarget,B.shade+step) or math.max(shadeTarget,B.shade-step)
+  -- v38: under the lenses the arcs form quickly, so the swap feels immediate
+  local tau=blissTarget>B.bliss and (B.shade>.01 and .3 or .8) or 1.5
   B.bliss=B.bliss+(blissTarget-B.bliss)*(1-math.exp(-dt/tau))
   -- what the face underneath shows while being petted
   B.petMood=comfort and 'heureux' or nil
@@ -2116,6 +2305,14 @@ local function overlay(now,dt)
   o.dentAngle=0
   o.dx=lx*lean*.16+O.sway.x*.05+musicX
   o.dy=ly*lean*.12+O.hop.x*.6+musicY
+  -- asleep: only the body breathes (see o.breath); the eyes stay still
+  B.sleepMix=(B.sleepMix or 0)+((B.asleep and 1 or 0)-(B.sleepMix or 0))*(1-math.exp(-dt/1.2))
+  -- asleep the eyes sit lower and stay still
+  -- pebble: the sleepy face is authored high (eyes +.21 up); both sleep faces
+  -- settle to about .16 below the centre, like a dozing face looking down
+  local drop=B.asleep and (B.expr=='somnolent' and .27 or .08) or 0
+  B.sleepDrop=(B.sleepDrop or 0)+(drop-(B.sleepDrop or 0))*(1-math.exp(-dt/1))
+  o.eyeLift=B.sleepDrop
   if e.sad>.3 then o.dy=o.dy+.03*e.sad end
   o.roll=lx*lean*7+O.sway.x*7+math.sin(now*3.2)*7*e.dizzy+musicRoll
   o.bodyRoll=musicRoll
@@ -2124,11 +2321,14 @@ local function overlay(now,dt)
   -- no fast breathing: it read as trembling
   local period,amp=3.4,0
   if B.bliss>.3 then period,amp=4.6,.006*B.bliss end
+  if B.sleepMix>.01 then period,amp=4.4,.03*B.sleepMix end   -- slow sleeping breath, eased in/out
   o.breath=1+math.sin(now*TAU/period)*amp
   o.eyeScale=1
   local lid=1-.2*clamp(e.anger*1.5-.3)
   o.lid=clamp(lid,.08,1)
   o.bliss=B.bliss*(1-B.spiral)
+  o.shades=B.shade*(1-B.spiral)
+  o.still=B.asleep
   o.spiral=B.spiral
   o.spiralPhase=B.spiralPhase
   o.stars=B.spiral
@@ -2142,7 +2342,7 @@ local function overlay(now,dt)
     avoidTarget=(cycle>1.6 or now<B.flee) and clamp(math.max(e.shy,e.fear,now<B.flee and 1 or 0)*1.4) or 0
   end
   B.avoid=B.avoid+(avoidTarget-B.avoid)*(1-math.exp(-dt/.6))
-  local look={noFollow=B.spiralOn or B.spiral>.05 or e.dizzy>.3,avoid=B.avoid,spin=e.dizzy*(1-B.spiral),tau=cling<.3 and .25 or .14,rate=90}
+  local look={noFollow=B.asleep or B.spiralOn or B.spiral>.05 or e.dizzy>.3,avoid=B.avoid,spin=e.dizzy*(1-B.spiral),tau=cling<.3 and .25 or .14,rate=90}
   if not GazeEnabled() or (M.valid and now-M.lastMove>8) then
     if now>=B.wander.next then
       B.wander.next=now+rnd(1.5,5)
@@ -2155,6 +2355,7 @@ local function overlay(now,dt)
     B.wander.mix=B.wander.mix*math.exp(-dt/.3)
   end
   look.wander=B.wander
+  if B.asleep then look.sleep=true;look.sleepYaw=B.sleepYaw;look.tau=.9;look.rate=25 end
   B.look=look
 end
 
@@ -2229,11 +2430,14 @@ do
   NOTE_UNIT[3]=pts
 end
 
+-- a bold "Z" (unit square, centred), drawn with the note shapes
+local Z_UNIT={{-.5,-.5},{.5,-.5},{.5,-.28},{-.14,.28},{.5,.28},{.5,.5},{-.5,.5},{-.5,.28},{.14,-.28},{-.5,-.28}}
+
 local function musicNotes(now,dt)
   local list=B.notes
   if not list then list={};B.notes={};list=B.notes end
   -- no new notes while a full action plays (the sway waits for it too)
-  if Mu.beat and Mu.dancing and not B.action then
+  if Mu.beat and Mu.dancing and not B.action and not B.asleep and now>=(B.danceWait or 0) then
     Mu.noteBeat=(Mu.noteBeat or 0)+1
     if (Mu.noteBeat%2==0 or Mu.busy>.5) and #list<4 then
       Mu.noteSide=-(Mu.noteSide or 1)
@@ -2242,11 +2446,42 @@ local function musicNotes(now,dt)
         r=.22+math.random()*.06,tilt=-8+math.random()*16}
     end
   end
+  -- v31: asleep, a "Z" rises from the top right about every 1.1 s, grows
+  -- while it floats and fades on its own (about 3 at a time)
+  local zs=B.zs
+  if not zs then zs={};B.zs=zs end
+  if B.asleep and now>=(B.zNext or 0) and #zs<3 then
+    B.zNext=now+1.05+math.random()*.25
+    zs[#zs+1]={born=now,life=3.3,x0=.55,y0=-.85,k=.14,tilt=-14+math.random()*8,wob=math.random()*TAU}
+  end
   local size=B.size or 200
   local R=100*size/360
   local c=size/2
   local paths={}
   local i=1
+  while zs[i] do
+    local z=zs[i]
+    local age=now-z.born
+    if age<0 then i=i+1
+    elseif age>=z.life then table.remove(zs,i) else
+      local u=age/z.life
+      local alpha=clamp(age/.35)*clamp((1-u)/.4)*.9
+      local k=(z.k+.2*u)*R
+      local x=c+(z.x0+.5*u+math.sin(age*2.2+z.wob)*.05)*R
+      local y=c+(z.y0-.62*u)*R
+      local ang=z.tilt*PI/180
+      local ca,sa=math.cos(ang),math.sin(ang)
+      local parts={}
+      for j=1,#Z_UNIT do
+        local ux,uy=Z_UNIT[j][1],Z_UNIT[j][2]
+        parts[#parts+1]=(j==1 and '' or 'LineTo ')..string.format('%.2f,%.2f',x+(ux*ca-uy*sa)*k,y+(ux*sa+uy*ca)*k)
+      end
+      parts[#parts+1]='ClosePath 1'
+      paths[#paths+1]={path=table.concat(parts,' | '),alpha=alpha}
+      i=i+1
+    end
+  end
+  i=1
   while list[i] do
     local n=list[i]
     local age=now-n.born
@@ -2271,6 +2506,37 @@ local function musicNotes(now,dt)
     end
   end
   B.notePaths=paths
+  -- v42: impatience marks: state here, shapes in paint (they follow the body).
+  -- The vein only shows on the way up: after the scribble it calms quietly.
+  local an=B.annoy or 0
+  if an>.85 then B.scribOn=true elseif an<.75 then B.scribOn=false end
+  if B.scribOn then B.scribDone=true elseif an<.3 then B.scribDone=nil end
+  local vT=(an>.3 and not B.scribDone) and 1 or 0
+  local sT=B.scribOn and 1 or 0
+  local vm,sm=B.veinMix or 0,B.scribMix or 0
+  vm=vm+(vT-vm)*(1-math.exp(-dt/(vT>vm and .12 or .25)))
+  sm=sm+(sT-sm)*(1-math.exp(-dt/(sT>sm and .12 or .25)))
+  B.veinMix,B.scribMix=vm,sm
+  local function pop(m) local q=clamp(m);return q*(1+.35*math.sin(PI*q)) end
+  local lv=clamp((an-.3)/.55)
+  B.veinPh=(B.veinPh or 0)+dt*(1.4+1.6*lv)
+  B.veinK=pop(vm)*(1+(.06+.1*lv)*math.max(0,math.sin(B.veinPh*TAU))^4)
+  B.scribK=pop(sm)
+  if sT>0 and not B.scribAt then
+    B.scribAt=now;B.bubbleSeed={math.random()*TAU,math.random()*TAU}
+  elseif sT==0 and sm<.01 then B.scribAt=nil end
+  -- boiling scribble: a new random tangle every ~0.1 s
+  if sm>.01 and now>=(B.scribNext or 0) then
+    local heat=clamp((an-.75)/.25)
+    B.scribNext=now+.12-.04*heat
+    local P,a={},math.random()*TAU
+    for i=1,12+math.floor(3*heat) do
+      a=a+1.6+math.random()*1.6
+      local r=.55+math.random()*.45
+      P[i]={math.cos(a)*r,math.sin(a)*r}
+    end
+    B.scribPts=P
+  end
 end
 
 local function brainUpdate(now,realNow,dt,size,geo)
@@ -2320,8 +2586,94 @@ local function brainStatus()
   return string.format('%s/%s %s | joy%.1f fear%.1f ang%.1f cur%.1f shy%.1f dz%.1f sad%.1f exc%.1f bored%.1f\naff%.2f brave%.2f cling%.2f pat%.2f en%.2f | %s %s | %s\nmusic conf %.2f  %.0f bpm  busy %.1f%s',
     B.body or '?',B.expr or '?',B.action or '',e.joy,e.fear,e.anger,e.curious,e.shy,e.dizzy,e.sad,e.excite,B.bored,
     B.affinity,T('Bravery'),T('Cling'),T('Patience'),T('Energy'),layer,fullInteraction() and 'full' or 'calm',
-    B.lastEvent or '-',Mu.conf or 0,Mu.period and 60/Mu.period or 0,Mu.busy or 0,Mu.dancing and '  dance' or '')..string.format('\nnext auto %.0fs%s | full anims (10 min) %d',
-    math.max(0,(B.nextAuto or 0)-(B.now or 0)),B.holdWhy and (' held: '..B.holdWhy) or '',B.actLog and #B.actLog or 0)
+    B.lastEvent or '-',Mu.conf or 0,Mu.period and 60/Mu.period or 0,Mu.busy or 0,Mu.dancing and '  dance' or '')..string.format('\nnext auto %.0fs%s | full anims (10 min) %d%s',
+    math.max(0,(B.nextAuto or 0)-(B.now or 0)),B.holdWhy and (' held: '..B.holdWhy) or '',B.actLog and #B.actLog or 0,
+    B.asleep and (' | sleep '..(B.sleepKind or '?')..(B.sleepKind=='long' and '' or string.format(' %.0fs',math.max(0,(B.sleepUntil or 0)-(B.now or 0))))
+      ..string.format(' wake %.1f/%.1f%s',B.disturb or 0,B.wakeNeed or 0,B.heavySleep and ' heavy' or ''))
+    or ((B.wakeMood and (B.now or 0)<(B.wakeUntil or 0)) and (' | woke '..B.wakeMood) or (Mu.dancing and B.danceMood and (' | mood '..(B.danceEyes or B.danceMood)) or '')))
+end
+
+-- v42: a rounded vein cross (sticker: eye-colour rim, body-colour core) at
+-- the top right outside the head, and a round speech bubble with a scribble
+local function impatienceMarks(g)
+  local out={}
+  local vm,sm=B.veinMix or 0,B.scribMix or 0
+  if vm<=.01 and sm<=.01 then return out end
+  local l,r,t,b=1e9,-1e9,1e9,-1e9
+  for i=1,#g.pts do
+    local q=g.pts[i]
+    l=math.min(l,q[1]);r=math.max(r,q[1]);t=math.min(t,q[2]);b=math.max(b,q[2])
+  end
+  local cx,cy,rx,ry=(l+r)/2,(t+b)/2,(r-l)/2,(b-t)/2
+  local function path(list,close)
+    local parts={}
+    for i=1,#list do parts[i]=(i==1 and '' or 'LineTo ')..string.format('%.2f,%.2f',list[i][1],list[i][2]) end
+    parts[#parts+1]='ClosePath '..close
+    return table.concat(parts,' | ')
+  end
+  if vm>.01 then
+    local k=.24*math.min(rx,ry)*(B.veinK or 1)
+    local mx,my=cx+.8*rx,cy-.8*ry
+    out.vein={alpha=clamp(vm),rim=.55*k,core=.33*k}
+    for q=1,4 do
+      local sx,sy=(q==1 or q==4) and 1 or -1,q<=2 and -1 or 1
+      local list={}
+      for j=0,12 do
+        local s1=j/12
+        local u=1-s1
+        local x=u*u*.3+2*u*s1*.16+s1*s1*.95
+        local y=u*u*.95+2*u*s1*.16+s1*s1*.3
+        list[#list+1]={mx+sx*x*k,my+sy*y*k}
+      end
+      out.vein[q]=path(list,0)
+    end
+  end
+  if sm>.01 and B.scribPts then
+    local kk=B.scribK or 1
+    local now=B.now or 0
+    local jit=clamp(1-(now-(B.scribAt or now))/.5)*.04*rx
+    local bx=cx+.95*rx+math.sin(now*37)*jit
+    local by=cy-.95*ry+math.cos(now*31)*jit
+    local rad=.4*math.min(rx,ry)*kk
+    local sd=B.bubbleSeed or {0,0}
+    -- a slightly uneven circle, tail towards the head
+    local a0=math.atan2((cy-.5*ry)-by,(cx+.5*rx)-bx)
+    local function edge(a) return rad*(1+.05*math.sin(3*a+sd[1])+.035*math.sin(5*a+sd[2])) end
+    local list,done={},false
+    for j=0,47 do
+      local a=j/48*TAU
+      local d=math.abs((a-a0+PI)%TAU-PI)
+      if d<.28 then
+        if not done then
+          done=true
+          for _,o in ipairs({{-.28,.97},{0,1.5},{.28,.97}}) do
+            local aa=a0+o[1]
+            list[#list+1]={bx+math.cos(aa)*edge(aa)*o[2],by+math.sin(aa)*edge(aa)*o[2]}
+          end
+        end
+      else
+        local e=edge(a)
+        list[#list+1]={bx+math.cos(a)*e,by+math.sin(a)*e}
+      end
+    end
+    out.bubble={path=path(list,1),alpha=clamp(sm),w=math.max(1.2,.05*rx)}
+    -- the tangle: a smooth curve through the random points
+    local P=B.scribPts
+    local ink={}
+    local sc=rad*.68
+    for i=2,#P-2 do
+      local p0,p1,p2,p3=P[i-1],P[i],P[i+1],P[i+2]
+      for j=0,7 do
+        local u=j/8
+        local u2,u3=u*u,u*u*u
+        local x=.5*(2*p1[1]+(-p0[1]+p2[1])*u+(2*p0[1]-5*p1[1]+4*p2[1]-p3[1])*u2+(-p0[1]+3*p1[1]-3*p2[1]+p3[1])*u3)
+        local y=.5*(2*p1[2]+(-p0[2]+p2[2])*u+(2*p0[2]-5*p1[2]+4*p2[2]-p3[2])*u2+(-p0[2]+3*p1[2]-3*p2[2]+p3[2])*u3)
+        ink[#ink+1]={bx+x*sc,by+y*sc*.9}
+      end
+    end
+    out.scrib={path=path(ink,0),alpha=clamp(sm),w=math.max(1,.032*rx)}
+  end
+  return out
 end
 
 local options={}
@@ -2347,13 +2699,34 @@ local function paint(g)
   for j=1,3 do
     local st=g.stars and g.stars[j]
     set('Avatar','Star'..j,st and st.path or '0,0 | LineTo 0,0 | ClosePath 1')
-    set('Avatar','Shape'..(13+j),'Path Star'..j..' | Fill Color '..ThemeBodyColor()..','..math.floor(clamp(st and st.alpha or 0)*255+.5)..' | StrokeWidth 0')
+    set('Avatar','Shape'..(13+j),'Path Star'..j..' | Fill Color '..(st and st.eye and ThemeEyeColor() or ThemeBodyColor())..','..math.floor(clamp(st and st.alpha or 0)*255+.5)..' | StrokeWidth 0')
   end
   for j=1,4 do
     local nt=B.notePaths and B.notePaths[j]
     set('Avatar','Note'..j,nt and nt.path or '0,0 | LineTo 0,0 | ClosePath 1')
     set('Avatar','Shape'..(16+j),'Path Note'..j..' | Fill Color '..ThemeBodyColor()..','..math.floor(clamp(nt and nt.alpha or 0)*255+.5)..' | StrokeWidth 0')
   end
+  -- v41: impatience marks, in front
+  local im=impatienceMarks(g)
+  local eyeC,bodyC=ThemeEyeColor(),ThemeBodyColor()
+  local none='0,0 | LineTo 0,0 | ClosePath 1'
+  local function a255(v) return math.floor(clamp(v or 0)*255+.5) end
+  for q=1,4 do
+    local v=im.vein
+    set('Avatar','Mark'..q,v and v[q] or none)
+    local tail=' | StrokeStartCap Round | StrokeEndCap Round | StrokeLineJoin Round'
+    set('Avatar','Shape'..(20+q),'Path Mark'..q..' | Fill Color 0,0,0,0 | Stroke Color '..eyeC..','..a255(v and v.alpha)
+      ..' | StrokeWidth '..string.format('%.2f',v and v.rim or 0)..tail)
+    set('Avatar','Shape'..(24+q),'Path Mark'..q..' | Fill Color 0,0,0,0 | Stroke Color '..bodyC..','..a255(v and v.alpha)
+      ..' | StrokeWidth '..string.format('%.2f',v and v.core or 0)..tail)
+  end
+  local bu,sc=im.bubble,im.scrib
+  set('Avatar','Bubble',bu and bu.path or none)
+  set('Avatar','Shape29','Path Bubble | Fill Color '..bodyC..','..a255(bu and bu.alpha)..' | Stroke Color '..eyeC..','..a255(bu and bu.alpha)
+    ..' | StrokeWidth '..string.format('%.2f',bu and bu.w or 0)..' | StrokeLineJoin Round')
+  set('Avatar','Scribble',sc and sc.path or none)
+  set('Avatar','Shape30','Path Scribble | Fill Color 0,0,0,0 | Stroke Color '..eyeC..','..a255(sc and sc.alpha)
+    ..' | StrokeWidth '..string.format('%.2f',sc and sc.w or 0)..' | StrokeStartCap Round | StrokeEndCap Round | StrokeLineJoin Round')
   if g.badge then
     set('Avatar','Shape7','Ellipse '..xy(g.badge.x,g.badge.y)..','..g.badge.notch..' | Fill Color '..ThemeEyeColor()..','..bodyAlpha..' | StrokeWidth 0')
     set('Avatar','Shape9','Ellipse '..xy(g.badge.x,g.badge.y)..','..g.badge.r..' | Fill Color 36,150,232,255 | StrokeWidth 0')
