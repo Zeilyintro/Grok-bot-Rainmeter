@@ -238,9 +238,21 @@ local function blend(a,b,t)
   while rot>PI do rot=rot-TAU end
   while rot<-PI do rot=rot+TAU end
   p[2]=a[2]+rot*t
-  local badge=t<.5 and a or b
-  p.n=badge.n
-  for i=26,29 do p[i]=badge[i] end
+  -- v51: the notify badge rides the morph: it shrinks away (or grows in)
+  -- instead of vanishing at the halfway point
+  if a.n and b.n then
+    p.n=true
+  elseif a.n or b.n then
+    local src=a.n and a or b
+    local k=a.n and clamp(1-t/.6) or clamp((t-.4)/.6)
+    k=k*k*(3-2*k)
+    p.n=k>0
+    for i=26,29 do p[i]=src[i] end
+    p[28]=src[28]*k;p[29]=src[29]*k
+  else
+    p.n=false
+    for i=26,29 do p[i]=b[i] end
+  end
   return p
 end
 local function poseAt(style,t)
@@ -820,12 +832,14 @@ local function choose()
       actions[#actions+1]=i
     end
   end
-  -- Keep the original 64-rest / 13-action balance and five-rest limit.
+  -- v50: 40 rests per round (was 64) so full animations show more often;
+  -- five-rest limit as before.
   -- Only action styles use a shuffle bag; rest targets may repeat later.
   if restRemaining==nil or (restRemaining==0 and #pool==0) then
-    restRemaining=math.min(restCount,64)
-    -- v30: sleep is not a random pick any more (it follows the idle time)
-    for _,i in ipairs(actions) do if styles[i].id~='sleep' then pool[#pool+1]=i end end
+    restRemaining=math.min(restCount,40)
+    -- v50: the original sleep animation is an ordinary random pick again
+    -- (real sleep, the pebble, still follows the idle time)
+    for _,i in ipairs(actions) do pool[#pool+1]=i end
     -- notify ("!" bubble) is in the bag twice: it was one of 13 and rarely seen
     for _,i in ipairs(actions) do if styles[i].id=='notify' then pool[#pool+1]=i end end
   end
@@ -877,6 +891,21 @@ local function choose()
   end
   local mode=weightedPick(modes,weights)
   return remember(pickTarget(groups[mode],'rest'),mode)
+end
+
+-- v48: the pick after a full animation's rest: any rest style (original
+-- weighting, unused ones first) on a body other than the current one
+local function awayRest(body)
+  local blocked={}
+  for _,i in ipairs(recent) do blocked[i]=true end
+  local rests={}
+  for i,st in ipairs(styles) do
+    if st.kind=='rest' and st.body~=body and not blocked[i] then rests[#rests+1]=i end
+  end
+  if #rests==0 then return nil end
+  -- v52: this pick does not use a rest of the round's quota, so the 40 rests
+  -- and 14 animations stay evenly mixed (no clusters at the round's end)
+  return remember(pickTarget(rests,'rest'),nil)
 end
 
 
@@ -1075,7 +1104,8 @@ local function actionPlan(style)
   if style.id=='exclaim' or style.id=='alert' then
     plan.total=plan.total+.3
   elseif plan.turn then
-    plan.total=plan.turn+plan.back+.3
+    -- v50: no return to the idle circle; the next style morphs from here
+    plan.total=plan.turn
   elseif style.id=='notify' then
     -- the pop-in ends at ~.45 s and the authored pose holds to 7.2 s:
     -- show the finished badge for a while instead of ~2 s
@@ -1085,10 +1115,15 @@ local function actionPlan(style)
     local length=style.base/60
     if style.id=='orbit' then length=4 elseif style.id=='play' then length=3 end
     plan.total=length/speed+.4
-    -- comet and burst end exactly on the plain circle pose: it stays there a
-    -- moment (blinking, looking around) before the usual morph back
-    if style.id=='comet' or style.id=='burst' then plan.total=plan.total+randomSeconds(1.5,3) end
+    -- v53: play and orbit hold their end pose for the original dwell; during
+    -- the hold the face reacts again (comet/burst become a rest at the end)
+    if style.id=='orbit' or style.id=='play' then
+      B.holdAt=(B.now or 0)+plan.total
+      plan.total=plan.total+dwell()*(1+B.bored*.8)
+      return plan
+    end
   end
+  B.holdAt=nil
   return plan
 end
 
@@ -1165,7 +1200,7 @@ local function playAction(now,id,cooldown,force)
 end
 
 -- v30 sleep: a still pebble (galet) with a bored or sleepy face; it does not
--- change while asleep. Pointer idle 45 s: one nap (20-45 s); idle 90-240 s:
+-- change while asleep. Pointer idle 120 s (v50): one nap (20-45 s); idle 240-360 s:
 -- deep sleep (2-5 min), awake 1-2 min between; the third deep sleep lasts
 -- until a fast swipe / full lap (grumpy) or music (slowly) wakes it.
 -- Without pointer data it naps at random every 5-10 min.
@@ -1173,7 +1208,7 @@ local function startSleep(now,kind)
   local mood=math.random()<.5 and 'blase' or 'somnolent'
   local ok=goRest(now,'galet',mood,'sleep')
   if not ok and not (B.body=='galet' and B.expr==mood) then return false end
-  B.asleep=true;B.sleepKind=kind;B.musicFor=0;B.zNext=now+2.2
+  B.asleep=true;B.sleepKind=kind;B.musicFor=0;B.backFor=0;B.zNext=now+2.2
   B.sleepYaw=({-6,0,6})[math.random(1,3)]   -- the eyes rest a little left, centred or right
   -- how much disturbance wakes it: a few swipes or laps; now and then (8%)
   -- it sleeps like a log and only long, persistent playing wakes it
@@ -1960,12 +1995,12 @@ local function weighted(map)
   return 'neutre'
 end
 
-local BODY_WEIGHTS={cercle=1,galet=1,squircle=1,capsule=1,triangle=1,hexagone=1,nuage=1,goutte=1,etoile=.4,fleur=.6}
+-- v47: every body is equally likely (no star/flower weights)
 local function pickBody(except)
   local map,total={},0
   for _,b in ipairs(Ix.bodies) do
     if b~=except then
-      local w=BODY_WEIGHTS[b] or 1
+      local w=1
       map[b]=w;total=total+w
     end
   end
@@ -2018,9 +2053,7 @@ local function decide(now,dt)
   if B.hover and not B.petting then
     if B.affinity>.45 or T('Cling')>.6 then feel('joy',.12*dt) else feel('shy',.2*dt) end
   end
-  if e.excite>.75 and Mu.conf<.1 and now-Mu.lastBeat>10 and B.body~='etoile' and now>B.bodyLock and not B.action and not B.asleep then
-    if goRest(now,'etoile',B.expr) then B.bodyLock=now+10 end
-  end
+  -- v46: no excitement -> star rule; bodies follow the original selector
   if Mu.dancing then
     -- A full action that is already playing finishes first (the sway waits,
     -- see hearing); dancing only keeps new full actions from starting.
@@ -2051,14 +2084,22 @@ local function decide(now,dt)
   local cycle=M.valid and math.max(M.lastMove,B.idleBase or -1e9) or 0
   local idleFor=M.valid and now-cycle or 0
   if cycle~=B.idleCycle then B.idleCycle=cycle;B.napDone=false;B.deepCount=0;B.deepAt=nil end
-  local sleepAfter=90+T('Energy')*150
+  local sleepAfter=240+T('Energy')*120
   if Mu.dancing then B.bored=0
   elseif idleFor>30 then B.bored=clamp((idleFor-30)/(sleepAfter-30)) else B.bored=decayTo(B.bored,2,dt) end
   if B.asleep then
     -- music wakes it slowly (after ~3 s), otherwise it wakes by itself
     B.musicFor=Mu.dancing and (B.musicFor or 0)+dt or 0
     B.disturb=decayTo(B.disturb or 0,10,dt)
+    -- v46: the user is back (pointer moving ~60 s in total; pauses longer
+    -- than 3 s slowly take it back) -> a dead sleep ends by itself
+    if B.sleepKind=='long' and M.valid then
+      local gap=now-M.lastMove
+      if gap<1.5 then B.backFor=(B.backFor or 0)+dt
+      elseif gap>3 then B.backFor=math.max(0,(B.backFor or 0)-dt*.5) end
+    end
     if B.musicFor>=3 then wake(now,'music')
+    elseif (B.backFor or 0)>=60 then wake(now,'back')
     elseif now>=(B.sleepUntil or 0) then wake(now,'soft') end
     if B.asleep then return end              -- asleep: nothing else changes
   end
@@ -2068,8 +2109,8 @@ local function decide(now,dt)
   local due,soon=nil,false
   if M.valid then
     if idleFor>=sleepAfter and now>=(B.deepAt or 0) then due=(B.deepCount or 0)>=2 and 'long' or 'deep'
-    elseif idleFor>=45 and not B.napDone then due='nap' end
-    soon=(not B.napDone and idleFor>=33) or (idleFor>=sleepAfter-12 and now>=(B.deepAt or 0)-12)
+    elseif idleFor>=120 and not B.napDone then due='nap' end
+    soon=(not B.napDone and idleFor>=108) or (idleFor>=sleepAfter-12 and now>=(B.deepAt or 0)-12)
   else
     B.randNapAt=B.randNapAt or now+rnd(300,600)
     if now>=B.randNapAt then due='nap' end
@@ -2090,7 +2131,12 @@ local function decide(now,dt)
   end
   if B.drowsyAt then return end             -- drowsy: nothing else changes
 
-  if B.action then return end
+  if B.action then
+    if not (B.holdAt and now>=B.holdAt) then return end
+    local expr=pickExpression(now)
+    if expr then goRest(now,B.body,expr,URGENT[expr] and 'urgent' or 'soft') end
+    return
+  end
   local expr=pickExpression(now)
   if expr then goRest(now,B.body,expr,URGENT[expr] and 'urgent' or 'soft');return end
 
@@ -2132,7 +2178,8 @@ local function decide(now,dt)
     end
     local wait=dwell()*(busy and 1.25 or 1)*(1+B.bored*.8)
     B.nextAuto=now+wait
-    local index=choose()
+    local index=B.leaveBody and awayRest(B.body) or choose()
+    B.leaveBody=nil
     local st=styles[index]
     -- while you play with it: no actions that clash with the moment, and
     -- the face stays with the current feeling (only the body changes)
@@ -2567,15 +2614,37 @@ local function brainUpdate(now,realNow,dt,size,geo)
 end
 
 local function brainPlanEnded(now)
-  local wait=math.max(2,B.afterActionWait or 0,(B.nextAuto or now)-now)
-  -- Return directly to the current feeling, avoiding a stale face then another morph.
+  -- v50: a full animation morphs straight from its last pose into the next
+  -- rest style the selector picks (original weighting, not the body it had
+  -- before the animation); that style then gets the original dwell.
+  B.afterActionWait=nil;B.leaveBody=nil
+  -- v53: comet and burst end exactly on the plain circle: that pose simply
+  -- becomes the rest style and gets the original dwell
+  if (B.action=='comet' or B.action=='burst') and goRest(now,'cercle','neutre') then
+    B.idleExpr=B.expr
+    scheduleAuto(now,dwell()*(1+B.bored*.8))
+    if quietNow(now) then B.autoHold=B.nextAuto+.5 end
+    return
+  end
+  local index=awayRest(B.body)
+  if index then
+    local st=styles[index]
+    local expr=(B.bored>.35 or not quietNow(now)) and B.expr or st.expression
+    if goRest(now,st.body,expr) then
+      B.idleExpr=B.expr
+      scheduleAuto(now,dwell()*(1+B.bored*.8))
+      if quietNow(now) then B.autoHold=B.nextAuto+.5 end
+      return
+    end
+  end
+  local wait=math.max(2,(B.nextAuto or now)-now)
+  -- fallback: return directly to the current feeling
   local s=scores()
   local expr,score=B.expr,s[B.expr] or 0
   for _,name in ipairs(EXPRESSIONS) do
     if (s[name] or 0)>score+.1 then expr=name;score=s[name] end
   end
   goRest(now,B.body,expr)
-  B.afterActionWait=nil
   scheduleAuto(now,wait)
   if quietNow(now) then B.idleExpr=B.expr;B.autoHold=B.nextAuto+.5 end
 end
@@ -2588,7 +2657,7 @@ local function brainStatus()
     B.affinity,T('Bravery'),T('Cling'),T('Patience'),T('Energy'),layer,fullInteraction() and 'full' or 'calm',
     B.lastEvent or '-',Mu.conf or 0,Mu.period and 60/Mu.period or 0,Mu.busy or 0,Mu.dancing and '  dance' or '')..string.format('\nnext auto %.0fs%s | full anims (10 min) %d%s',
     math.max(0,(B.nextAuto or 0)-(B.now or 0)),B.holdWhy and (' held: '..B.holdWhy) or '',B.actLog and #B.actLog or 0,
-    B.asleep and (' | sleep '..(B.sleepKind or '?')..(B.sleepKind=='long' and '' or string.format(' %.0fs',math.max(0,(B.sleepUntil or 0)-(B.now or 0))))
+    B.asleep and (' | sleep '..(B.sleepKind or '?')..(B.sleepKind=='long' and string.format(' back %.0f/60s',B.backFor or 0) or string.format(' %.0fs',math.max(0,(B.sleepUntil or 0)-(B.now or 0))))
       ..string.format(' wake %.1f/%.1f%s',B.disturb or 0,B.wakeNeed or 0,B.heavySleep and ' heavy' or ''))
     or ((B.wakeMood and (B.now or 0)<(B.wakeUntil or 0)) and (' | woke '..B.wakeMood) or (Mu.dancing and B.danceMood and (' | mood '..(B.danceEyes or B.danceMood)) or '')))
 end
