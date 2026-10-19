@@ -4,7 +4,9 @@
 
 A Rainmeter desktop companion with more emotion and a stronger sense of companionship. It responds through expressions and gaze, develops a personality through interaction and sways with music.
 
-**5.3 · 171 styles · 10 bodies · Black and white themes**
+**5.4 · 171 styles · 10 bodies · Black and white themes**
+
+5.4 update: optimized memory usage.
 
 ![Shape morphing demo](docs/demo.gif)
 
@@ -20,9 +22,9 @@ A Rainmeter desktop companion with more emotion and a stronger sense of companio
 
 ## Installation and upgrade
 
-Requires Windows 10+ and Rainmeter 4.5.36.3894+.
+Requires Windows 10+ and Rainmeter 4.5.46.3894+.
 
-Download **Zeily-bot_5.3.rmskin** from the [5.3 release](https://github.com/Zeilyintro/Grok-bot-Rainmeter/releases/tag/v5.3), double-click to install, then load `Bloub/Bloub.ini`. The installer includes Settings.inc and both MousePos architectures. Music uses Rainmeter's built-in AudioLevel; no additional music plugin is needed.
+Download **Zeily-bot_5.4.rmskin** from the [5.4 release](https://github.com/Zeilyintro/Grok-bot-Rainmeter/releases/tag/v5.4), double-click to install, then load `Bloub/Bloub.ini`. The installer includes Settings.inc and both MousePos architectures. Music uses Rainmeter's built-in AudioLevel; no additional music plugin is needed.
 
 Before upgrading, back up `Bloub.ini` and `@Resources/Settings.inc`. Preserve your size, speed, switches and growth data after installation. Do not delete the installed skin first. Upgrading from 4.2 requires the complete installer, not a Lua-only replacement.
 

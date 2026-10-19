@@ -4,7 +4,9 @@
 
 更有情绪，也更有陪伴感。这个 Rainmeter 桌面 bot 会用眼神和表情回应你的靠近，在互动中慢慢形成性格，也会随着音乐摇摆。
 
-**5.3 · 171 个样式 · 10 种身体 · 黑白主题**
+**5.4 · 171 个样式 · 10 种身体 · 黑白主题**
+
+5.4 更新：优化了内存占用。
 
 ![形态变化演示](docs/demo.gif)
 
@@ -20,9 +22,9 @@
 
 ## 安装与升级
 
-需要 Windows 10+、Rainmeter 4.5.36.3894+。
+需要 Windows 10+、Rainmeter 4.5.46.3894+。
 
-从 [5.3 发行页](https://github.com/Zeilyintro/Grok-bot-Rainmeter/releases/tag/v5.3) 下载 **Zeily-bot_5.3.rmskin**，双击安装，然后加载 `Bloub/Bloub.ini`。安装包包含 Settings.inc 和 32/64 位 MousePos 插件；音乐使用 Rainmeter 内置 AudioLevel，无需额外音乐插件。
+从 [5.4 发行页](https://github.com/Zeilyintro/Grok-bot-Rainmeter/releases/tag/v5.4) 下载 **Zeily-bot_5.4.rmskin**，双击安装，然后加载 `Bloub/Bloub.ini`。安装包包含 Settings.inc 和 32/64 位 MousePos 插件；音乐使用 Rainmeter 内置 AudioLevel，无需额外音乐插件。
 
 升级前请备份 `Bloub.ini` 和 `@Resources/Settings.inc`。安装后保留自己的尺寸、速度、开关及成长数据；不要先删除旧皮肤。从 4.2 升级请使用完整安装包，不能只替换 Lua。
 

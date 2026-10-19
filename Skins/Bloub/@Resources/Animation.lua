@@ -2808,12 +2808,14 @@ end
 local function paintDecor(prefix,index,t,alpha,size,shiftX,o)
   local s=styles[index]
   local frame=clamp(math.floor(t*60),0,#s.seq-1)
-  local id=s.decor and (s.id..'_'..math.floor(frame/60)) or 'empty_0'
   local opacity=math.floor(clamp(alpha)*255+.5)
-  local folder=s.themedDecor and ThemeIsWhite() and 'DecorWhite' or 'Decor'
+  -- Fully hidden layers release their large strip by using the tiny blank.
+  local visible=s.decor and opacity>0
+  local id=visible and (s.id..'_'..math.floor(frame/60)) or 'empty_0'
+  local folder=visible and s.themedDecor and ThemeIsWhite() and 'DecorWhite' or 'Decor'
   local marker=prefix=='New' and loadedNew or loadedOld
   local asset=folder..'\\'..id
-  if opacity>0 and marker~=asset then
+  if marker~=asset then
     for _,side in ipairs({'Back','Front'}) do set(side..prefix,'BitmapImage',SKIN:GetVariable('@')..asset..'_'..side..'.png') end
     if prefix=='New' then loadedNew=asset else loadedOld=asset end
   end
